@@ -10,6 +10,8 @@ use std::{
 };
 
 const RUNS: u32 = 5;
+const LEAK_DEMO_TARGET: &str = "day999";
+const LEAK_DEMO_INPUT: &str = "FAKE-AOC-LEAK999";
 type ReportResult<T> = Result<T, Box<dyn Error>>;
 
 fn main() -> ExitCode {
@@ -113,10 +115,15 @@ fn run() -> ReportResult<()> {
         peak_bytes = peak_bytes.max(bytes);
     }
 
+    let leak_flags: &[_] = if target == LEAK_DEMO_TARGET {
+        &["--list", "--fullContent", "--hex", "--atExit", "--"]
+    } else {
+        &["--noContent", "--atExit", "--"]
+    };
     let output = measurement(
         root,
         "/usr/bin/leaks",
-        &["--noContent", "--atExit", "--"],
+        leak_flags,
         &binary,
         input.as_deref(),
     )?;
@@ -124,14 +131,27 @@ fn run() -> ReportResult<()> {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     ];
-    let (leak_report, leak_count) = leak_output
-        .iter()
-        .find_map(|stream| leak_report(stream))
-        .ok_or_else(|| format!("leaks did not produce a summary ({})", output.status))?;
+    let (mut leak_report, leak_count) =
+        leak_output
+            .iter()
+            .find_map(|stream| leak_report(stream))
+            .ok_or_else(|| format!("leaks did not produce a summary ({})", output.status))?;
     // leaks exits 1 when it finds leaks and uses other nonzero codes for errors.
     if !output.status.success() && (output.status.code() != Some(1) || leak_count == 0) {
         return Err(format!("leaks failed ({})", output.status).into());
     }
+    if target == LEAK_DEMO_TARGET {
+        let recovered = leak_output
+            .iter()
+            .flat_map(|stream| stream.lines())
+            .filter_map(|line| line.split_once(" \t"))
+            .map(|(_, ascii)| ascii.trim())
+            .find(|ascii| *ascii == LEAK_DEMO_INPUT)
+            .ok_or("leaks did not recover the fake input from the allocation")?;
+        leak_report.push('\n');
+        leak_report.push_str(recovered);
+    }
+    let leak_command = leak_flags.join(" ");
 
     let mean_ms = total_seconds / f64::from(RUNS) * 1000.0;
     let peak_kb = peak_bytes as f64 / 1000.0;
@@ -142,7 +162,7 @@ fn run() -> ReportResult<()> {
          - **Average wall-clock time**: {mean_ms:.2} ms\n\n\
          ## Memory over {RUNS} runs measured with `time -l`\n\n\
          - **Peak RSS**: {peak_kb:.2} KB\n\n\
-         ## Leak report measured with `leaks --noContent --atExit`\n\n\
+         ## Leak report measured with `leaks {leak_command}`\n\n\
          ```text\n{leak_report}\n```\n"
     );
 

@@ -28,7 +28,7 @@ fi
 
 shopt -s nullglob dotglob
 : > "$scratch/patterns"
-for input in inputs/*; do
+for input in input/*; do
     case "$input" in
         *.test.txt) continue ;;
     esac
