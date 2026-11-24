@@ -22,8 +22,8 @@ cargo aoc-report 0
 
 ## Pre-commit hooks
 
-A pre-commit hook (`git config core.hooksPath .githooks`) exists to ensure that puzzle inputs are not included in commits.
+A pre-commit hook (`git config core.hooksPath .githooks`) exists to ensure that puzzle inputs are not included in commits. It is not comprehensive, but it generally catches anything that might leak.
 
 ## AI disclosure
 
-AI assistance was used for the Cargo tooling, Day 0 template, report generator, hook, and documentation. Puzzle analysis and solutions are reserved for the author.
+AI assistance was used for the Cargo tooling, Day 0 template, report generator + sanitization, hook, and some documentation. Puzzle analysis and solutions are done manually.
