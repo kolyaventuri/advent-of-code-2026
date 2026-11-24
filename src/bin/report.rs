@@ -206,7 +206,16 @@ fn scrub_input(report: &str, input: &str) -> String {
                 scrubbed.push('\n');
             }
         } else {
-            scrubbed.push_str(line);
+            for (index, field) in line.split('"').enumerate() {
+                if index != 0 {
+                    scrubbed.push('"');
+                }
+                if index % 2 == 1 && input_lines.contains(field) {
+                    scrubbed.push_str(REDACTION);
+                } else {
+                    scrubbed.push_str(field);
+                }
+            }
         }
     }
     scrubbed
@@ -230,21 +239,27 @@ fn measurement(
 
 fn leak_report(output: &str) -> Option<(String, u64)> {
     let mut lines = output.lines().map(str::trim).rev();
-    let (totals, process, count) =
-        lines.find_map(|line| leak_summary(line).map(|(process, count)| (line, process, count)))?;
+    let (process, count, bytes) = lines.find_map(leak_summary)?;
     let mut malloc = None;
     let mut version = None;
     for line in lines {
-        if line.starts_with("leaks Report Version: ") {
-            version = Some(line);
+        if let Some(value) = line.strip_prefix("leaks Report Version: ") {
+            let number = value.strip_suffix(", multi-line stacks").unwrap_or(value);
+            if number.split_once('.').is_some_and(|(major, minor)| {
+                major.parse::<u32>().is_ok() && minor.parse::<u32>().is_ok()
+            }) {
+                version = Some(format!("leaks Report Version: {value}"));
+            }
             break;
         }
-        if let Some((pid, summary)) = line.split_once(": ") {
-            if pid == process && summary.contains(" nodes malloced for ") {
-                malloc = Some(line);
-            }
+        if let Some((nodes, size)) = malloc_summary(line, process) {
+            malloc = Some(format!(
+                "Process {process}: {nodes} nodes malloced for {size}"
+            ));
         }
     }
+    let noun = if count == 1 { "leak" } else { "leaks" };
+    let totals = format!("Process {process}: {count} {noun} for {bytes} total leaked bytes.");
     let report = version
         .into_iter()
         .chain(malloc)
@@ -254,18 +269,33 @@ fn leak_report(output: &str) -> Option<(String, u64)> {
     Some((report, count))
 }
 
-fn leak_summary(line: &str) -> Option<(&str, u64)> {
+fn malloc_summary(line: &str, process: u32) -> Option<(u64, &str)> {
+    let (pid, summary) = line.strip_prefix("Process ")?.split_once(": ")?;
+    if pid.parse::<u32>().ok()? != process {
+        return None;
+    }
+    let (nodes, size) = summary.split_once(" nodes malloced for ")?;
+    let (amount, unit) = size.split_once(' ')?;
+    let valid_amount = amount.parse::<u64>().is_ok()
+        || amount.split_once('.').is_some_and(|(whole, fraction)| {
+            whole.parse::<u64>().is_ok() && fraction.parse::<u64>().is_ok()
+        });
+    if !valid_amount || !matches!(unit, "B" | "bytes" | "KB" | "MB" | "GB" | "TB") {
+        return None;
+    }
+    Some((nodes.parse().ok()?, size))
+}
+
+fn leak_summary(line: &str) -> Option<(u32, u64, u64)> {
     let (prefix, summary) = line.split_once(": ")?;
-    let process = prefix.strip_prefix("Process ")?;
-    process.parse::<u32>().ok()?;
+    let process = prefix.strip_prefix("Process ")?.parse().ok()?;
     let (count, bytes) = summary
         .strip_suffix(" total leaked bytes.")?
         .split_once(" for ")?;
     let count = count
         .strip_suffix(" leaks")
         .or_else(|| count.strip_suffix(" leak"))?;
-    bytes.parse::<u64>().ok()?;
-    Some((prefix, count.parse().ok()?))
+    Some((process, count.parse().ok()?, bytes.parse().ok()?))
 }
 
 fn write_report(directory: &Path, name: &str, report: &str) -> std::io::Result<()> {
@@ -290,11 +320,11 @@ mod tests {
 
     #[test]
     fn scrubs_literal_input_blocks_and_individual_input_lines() {
-        let report = "Header\n\nLeak: [A.*\nR827]\nR827\nTotals\n";
+        let report = "Header\n\nLeak: [A.*\nR827]\nR827\npayload=\"R827\"\nTotals\n";
         let input = "A.*\r\nR827\r\n";
         assert_eq!(
             scrub_input(report, input),
-            "Header\n\nLeak: [<Puzzle Input Scrubbed Automatically>]\n<Puzzle Input Scrubbed Automatically>\nTotals\n"
+            "Header\n\nLeak: [<Puzzle Input Scrubbed Automatically>]\n<Puzzle Input Scrubbed Automatically>\npayload=\"<Puzzle Input Scrubbed Automatically>\"\nTotals\n"
         );
         assert_eq!(scrub_input(report, "\r\n"), report);
     }
@@ -308,21 +338,31 @@ mod tests {
             "Puzzle output\nProcess: example\nReport Version: 7\n{report}\nLeak stack trace\n"
         );
         assert_eq!(leak_report(&output), Some((report.to_owned(), 1)));
+        let malformed = "leaks Report Version: 4.0, unexpected contents\n\
+                         Process 123: 187 nodes malloced for 106 KB, unexpected contents\n\
+                         Process 123: 1 leak for 32 total leaked bytes.";
+        assert_eq!(
+            leak_report(malformed),
+            Some((
+                "Process 123: 1 leak for 32 total leaked bytes.".to_owned(),
+                1
+            ))
+        );
     }
 
     #[test]
     fn parses_leak_totals_without_retaining_diagnostic_text() {
         assert_eq!(
             leak_summary("Process 123: 0 leaks for 0 total leaked bytes."),
-            Some(("Process 123", 0))
+            Some((123, 0, 0))
         );
         assert_eq!(
             leak_summary("Process 123: 1 leak for 32 total leaked bytes."),
-            Some(("Process 123", 1))
+            Some((123, 1, 32))
         );
         assert_eq!(
             leak_summary("Process 123: 2 leaks for 96 total leaked bytes."),
-            Some(("Process 123", 2))
+            Some((123, 2, 96))
         );
         assert_eq!(
             leak_summary("Process 123: 187 nodes malloced for 106 KB"),

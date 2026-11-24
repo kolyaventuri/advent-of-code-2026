@@ -39,16 +39,21 @@ for input in input/*; do
 done
 LC_ALL=C sed '/^$/d' "$scratch/patterns" > "$scratch/nonblank"
 [[ -s "$scratch/nonblank" ]] || exit 0
+sed 's/^/"/; s/$/"/' "$scratch/nonblank" > "$scratch/quoted"
 
 for path in "${reports[@]}"; do
     git show ":$path" | LC_ALL=C sed $'s/\r$//' > "$scratch/report"
-    if LC_ALL=C grep -Fxf "$scratch/nonblank" "$scratch/report" >/dev/null; then
-        printf 'Commit blocked: staged report %s contains a line from a personal input.\n' "$path" >&2
-        exit 1
-    else
-        result=$?
-        if (( result != 1 )); then
-            exit "$result"
+    for pattern_file in nonblank quoted; do
+        flags=(-Ff)
+        [[ "$pattern_file" != nonblank ]] || flags=(-Fxf)
+        if LC_ALL=C grep "${flags[@]}" "$scratch/$pattern_file" "$scratch/report" >/dev/null; then
+            printf 'Commit blocked: staged report %s contains a line from a personal input.\n' "$path" >&2
+            exit 1
+        else
+            result=$?
+            if (( result != 1 )); then
+                exit "$result"
+            fi
         fi
-    fi
+    done
 done
