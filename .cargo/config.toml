@@ -1,0 +1,2 @@
+[alias]
+aoc-report = "run --quiet --bin report --"
