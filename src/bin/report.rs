@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     env,
     error::Error,
     ffi::OsStr,
@@ -165,6 +166,10 @@ fn run() -> ReportResult<()> {
          ## Leak report measured with `leaks {leak_command}`\n\n\
          ```text\n{leak_report}\n```\n"
     );
+    let report = match input {
+        Some(path) => scrub_input(&report, &fs::read_to_string(path)?),
+        None => report,
+    };
 
     let directory = root.join("report");
     fs::create_dir_all(&directory)?;
@@ -176,6 +181,35 @@ fn run() -> ReportResult<()> {
     write_report(&directory, report_name, &report)?;
     println!("Wrote report/{report_name}.md");
     Ok(())
+}
+
+fn scrub_input(report: &str, input: &str) -> String {
+    const REDACTION: &str = "<Puzzle Input Scrubbed Automatically>";
+
+    let input = input.replace("\r\n", "\n");
+    let block = input.trim_end_matches('\n');
+    let report = if block.contains('\n') {
+        std::borrow::Cow::Owned(report.replace(block, REDACTION))
+    } else {
+        std::borrow::Cow::Borrowed(report)
+    };
+    let input_lines: HashSet<_> = input
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    let mut scrubbed = String::with_capacity(report.len());
+    for line in report.split_inclusive('\n') {
+        let content = line.strip_suffix('\n').unwrap_or(line);
+        if input_lines.contains(content) {
+            scrubbed.push_str(REDACTION);
+            if line.ends_with('\n') {
+                scrubbed.push('\n');
+            }
+        } else {
+            scrubbed.push_str(line);
+        }
+    }
+    scrubbed
 }
 
 fn measurement(
@@ -252,7 +286,18 @@ fn write_report(directory: &Path, name: &str, report: &str) -> std::io::Result<(
 
 #[cfg(test)]
 mod tests {
-    use super::{leak_report, leak_summary};
+    use super::{leak_report, leak_summary, scrub_input};
+
+    #[test]
+    fn scrubs_literal_input_blocks_and_individual_input_lines() {
+        let report = "Header\n\nLeak: [A.*\nR827]\nR827\nTotals\n";
+        let input = "A.*\r\nR827\r\n";
+        assert_eq!(
+            scrub_input(report, input),
+            "Header\n\nLeak: [<Puzzle Input Scrubbed Automatically>]\n<Puzzle Input Scrubbed Automatically>\nTotals\n"
+        );
+        assert_eq!(scrub_input(report, "\r\n"), report);
+    }
 
     #[test]
     fn retains_the_version_and_matching_malloc_summary() {
