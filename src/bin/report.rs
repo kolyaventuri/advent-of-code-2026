@@ -10,7 +10,9 @@ use std::{
     time::Instant,
 };
 
-const RUNS: u32 = 5;
+const WARMUP_RUNS: usize = 2;
+const DEFAULT_TIMING_RUNS: usize = 15;
+const MEMORY_RUNS: usize = 5;
 const LEAK_DEMO_TARGET: &str = "day999";
 const LEAK_DEMO_INPUT: &str = "FAKE-AOC-LEAK999";
 type ReportResult<T> = Result<T, Box<dyn Error>>;
@@ -26,10 +28,21 @@ fn main() -> ExitCode {
 }
 
 fn run() -> ReportResult<()> {
-    let usage = "usage: cargo aoc-report <N|dayN|baseline>";
+    let usage = "usage: cargo aoc-report <N|dayN|baseline> [--runs <positive integer>]";
     let mut args = env::args_os().skip(1);
     let target_arg = args.next();
     let target_arg = target_arg.as_deref().and_then(OsStr::to_str).ok_or(usage)?;
+    let timing_runs = match args.next().as_deref() {
+        None => DEFAULT_TIMING_RUNS,
+        Some(flag) if flag == "--runs" => args
+            .next()
+            .as_deref()
+            .and_then(OsStr::to_str)
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|&count| count > 0)
+            .ok_or(usage)?,
+        Some(_) => return Err(usage.into()),
+    };
     if args.next().is_some() {
         return Err(usage.into());
     }
@@ -60,6 +73,7 @@ fn run() -> ReportResult<()> {
         )
     };
     let build_dir = root.join("target/report-build");
+    eprintln!("Building {target} in release mode");
     let status = Command::new(env!("CARGO"))
         .current_dir(root)
         .args([
@@ -81,26 +95,37 @@ fn run() -> ReportResult<()> {
         .join("release")
         .join(target);
 
-    let mut total_seconds = 0.0;
-    for _ in 0..RUNS {
-        let start = Instant::now();
-        let status = Command::new(&binary)
-            .args(input.iter())
-            .current_dir(root)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()?;
-        if !status.success() {
-            return Err(
-                format!("{target} exited with {status}. Run it directly for details.").into(),
-            );
+    let mut timings = Vec::new();
+    for (label, runs, timed) in [
+        ("Warmup", WARMUP_RUNS, false),
+        ("Timing", timing_runs, true),
+    ] {
+        for run in 1..=runs {
+            eprintln!("{label} run {run}/{runs}");
+            let mut command = Command::new(&binary);
+            command
+                .args(input.iter())
+                .current_dir(root)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            let start = timed.then(Instant::now);
+            let status = command.status()?;
+            let elapsed = start.map(|start| start.elapsed());
+            if !status.success() {
+                return Err(
+                    format!("{target} exited with {status}. Run it directly for details.").into(),
+                );
+            }
+            if let Some(elapsed) = elapsed {
+                timings.push(elapsed.as_secs_f64() * 1000.0);
+            }
         }
-        total_seconds += start.elapsed().as_secs_f64();
     }
 
     let mut peak_bytes = 0;
-    for _ in 0..RUNS {
+    for run in 1..=MEMORY_RUNS {
+        eprintln!("Memory run {run}/{MEMORY_RUNS}");
         let output = measurement(root, "/usr/bin/time", &["-l"], &binary, input.as_deref())?;
         if !output.status.success() {
             return Err(format!("/usr/bin/time -l failed ({})", output.status).into());
@@ -121,6 +146,7 @@ fn run() -> ReportResult<()> {
     } else {
         &["--noContent", "--atExit", "--"]
     };
+    eprintln!("Checking for leaks");
     let output = measurement(
         root,
         "/usr/bin/leaks",
@@ -154,14 +180,19 @@ fn run() -> ReportResult<()> {
     }
     let leak_command = leak_flags.join(" ");
 
-    let mean_ms = total_seconds / f64::from(RUNS) * 1000.0;
+    timings.sort_unstable_by(f64::total_cmp);
+    let lower_quartile_ms = percentile(&timings, 0.25);
+    let median_ms = percentile(&timings, 0.5);
+    let upper_quartile_ms = percentile(&timings, 0.75);
     let peak_kb = peak_bytes as f64 / 1000.0;
     let report = format!(
         "_This report was automatically generated via `cargo aoc-report {target}`._\n\n\
          # Report for {target}\n\n\
-         ## Performance over {RUNS} runs measured with `Instant`\n\n\
-         - **Average wall-clock time**: {mean_ms:.2} ms\n\n\
-         ## Memory over {RUNS} runs measured with `time -l`\n\n\
+         ## Performance over {timing_runs} timed runs measured with `Instant`\n\n\
+         After {WARMUP_RUNS} untimed warmup runs.\n\n\
+         - **Median wall-clock time**: {median_ms:.2} ms\n\
+         - **Middle 50% (25th–75th percentile)**: {lower_quartile_ms:.2}–{upper_quartile_ms:.2} ms\n\n\
+         ## Memory over {MEMORY_RUNS} runs measured with `time -l`\n\n\
          - **Peak RSS**: {peak_kb:.2} KB\n\n\
          ## Leak report measured with `leaks {leak_command}`\n\n\
          ```text\n{leak_report}\n```\n"
@@ -181,6 +212,13 @@ fn run() -> ReportResult<()> {
     write_report(&directory, report_name, &report)?;
     println!("Wrote report/{report_name}.md");
     Ok(())
+}
+
+fn percentile(sorted: &[f64], fraction: f64) -> f64 {
+    let rank = fraction * (sorted.len() - 1) as f64;
+    let lower = sorted[rank.floor() as usize];
+    let upper = sorted[rank.ceil() as usize];
+    lower + (upper - lower) * rank.fract()
 }
 
 fn scrub_input(report: &str, input: &str) -> String {

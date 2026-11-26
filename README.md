@@ -20,6 +20,11 @@ cargo aoc-report baseline
 cargo aoc-report 0
 ```
 
+The timing report shows the median wall-clock time and middle 50% of 15 runs
+after two untimed warmups. Each run launches the release binary. Use
+`cargo aoc-report 0 --runs 7` to change the number of timed runs. The command
+prints progress to stderr as it builds, runs measurements, and checks for leaks.
+
 ## Pre-commit hooks
 
 A pre-commit hook (`git config core.hooksPath .githooks`) exists to ensure that puzzle inputs are not included in commits. It is not comprehensive, but it generally catches anything that might leak.
